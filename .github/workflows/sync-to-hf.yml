@@ -1,0 +1,19 @@
+name: Sync to Hugging Face
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Push to Hugging Face
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git remote add hf https://AyushMehra:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/ayush2114/data-analyst-agent
+          git push hf main --force
