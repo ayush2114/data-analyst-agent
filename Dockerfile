@@ -1,56 +1,35 @@
-# Multi-stage build for smaller final image
-FROM python:3.11-slim as builder
+# Use Python 3.12 slim image as base
+FROM python:3.12-slim
 
-# Copy uv for faster package management
-COPY --from=ghcr.io/astral-sh/uv:0.8.3 /uv /uvx /bin/
-
+# Set working directory
 WORKDIR /app
 
-# Copy and install dependencies
-COPY pyproject.toml ./
-RUN uv pip install --system --no-cache-dir playwright
-
-# Production stage
-FROM python:3.11-slim
-
-# Install runtime dependencies for Playwright
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    libnss3 \
-    libnspr4 \
-    libdbus-1-3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxss1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libgbm1 \
-    libxkbcommon0 \
-    libasound2 \
+    gcc \
+    g++ \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Python packages from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy requirements file
+COPY requirements.txt .
 
-# Install Playwright browsers
-RUN playwright install --with-deps chromium
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-WORKDIR /app
+# Copy application files
+COPY app.py .
+COPY index.html .
+COPY entrypoint.sh .
 
-# Copy application code
-COPY tools/scrape_website.py ./
+# Copy environment file if it exists
+COPY .env* ./
 
-# Create non-root user
-RUN useradd --create-home --shell /bin/bash app \
-    && chown -R app:app /app
-USER app
-ENV PATH="/root/.local/bin/:$PATH"
+# Make entrypoint script executable
+RUN chmod +x entrypoint.sh
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import playwright; print('OK')" || exit 1
+# Expose the port the app runs on
+EXPOSE 8000
 
-CMD ["python", "scrape_website.py"]
+# Command to run the application
+CMD ["./entrypoint.sh"]
