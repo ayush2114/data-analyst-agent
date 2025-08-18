@@ -142,6 +142,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 🙏 Acknowledgments
 
+- Sammer Thakur for the original codebase this project is based on
 - Google for providing the Gemini API
 - The LangChain team for their excellent framework
 - All open-source contributors to the libraries used in this project
