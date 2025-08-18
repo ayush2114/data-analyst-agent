@@ -905,7 +905,7 @@ async def analyze_get_info():
     """Health/info endpoint. Use POST /api for actual analysis."""
     return JSONResponse({
         "ok": True,
-        "message": "Server is running. Use POST /api with 'questions_file' and optional 'data_file'.",
+        "message": "✅ Server is live. Send a POST request to /api with 'questions_file' (required) and 'data_file' (optional).",
     })
 
 
