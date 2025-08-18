@@ -1,3 +1,24 @@
+# ============================================================================
+# ╔═╗┌┬┐┌─┐┬─┐┌┬┐  ╔╦╗┌─┐┌┬┐┌─┐  ╔═╗┌┐┌┌─┐┬ ┬ ┬┌─┐┌┬┐  ╔═╗┌─┐┌─┐┌┐┌┌┬┐
+# ╚═╗ │ ├─┤├┬┘ │    ║║├─┤ │ ├─┤  ╠═╣│││├─┤│ └┬┘└─┐ │   ╠═╣│ ┬├┤ │││ │ 
+# ╚═╝ ┴ ┴ ┴┴└─ ┴   ═╩╝┴ ┴ ┴ ┴ ┴  ╩ ╩┘└┘┴ ┴┴─┘┴ └─┘ ┴   ╩ ╩└─┘└─┘┘└┘ ┴ 
+# ============================================================================
+#
+# A FastAPI application that provides a data analyst agent service with:
+#
+# - Web data scraping capabilities
+# - Local data analysis on uploaded files
+# - LLM-powered autonomous data analysis
+# - Robust model fallback and error handling
+# - Support for visualizations and multiple data formats
+#
+# The agent can analyze data, produce insights, and generate
+# visualizations in response to natural language questions.
+# ============================================================================
+
+# ===========================
+# STANDARD LIBRARY IMPORTS
+# ===========================
 import os
 import networkx as nx
 import re
@@ -5,65 +26,82 @@ import json
 import base64
 import tempfile
 import sys
+import logging
+import subprocess
+import time
+import socket
+import platform
+import shutil
+import asyncio
+import traceback
+from io import BytesIO, StringIO
+from typing import Dict, Any, List
+from datetime import datetime, timedelta
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+
+# ===========================
+# THIRD-PARTY IMPORTS
+# ===========================
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-import io
-import os
-import re
-import json
-import base64
-import tempfile
-import subprocess
-import logging
-from io import BytesIO
-from typing import Dict, Any, List
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi import FastAPI
+import requests
+import httpx
+import importlib.metadata
+import psutil
+
+# ===========================
+# FASTAPI COMPONENTS
+# ===========================
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Query
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
+
+# ===========================
+# ENVIRONMENT & CONFIGURATION
+# ===========================
 from dotenv import load_dotenv
 
-import requests
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
-
-# Optional image conversion
+# ===========================
+# IMAGE PROCESSING
+# ===========================
 try:
     from PIL import Image
     PIL_AVAILABLE = True
 except Exception:
     PIL_AVAILABLE = False
 
-# LangChain / LLM imports (keep as you used)
+# ===========================
+# LANGCHAIN / LLM COMPONENTS
+# ===========================
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 
+# ===========================
+# APPLICATION INITIALIZATION
+# ===========================
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="TDS Data Analyst Agent")
+app = FastAPI()
 
-# -------------------- Robust Gemini LLM with fallback --------------------
-from collections import defaultdict
-import time
-from langchain_google_genai import ChatGoogleGenerativeAI
-
-# Config
-GEMINI_KEYS = [os.getenv(f"gemini_api_{i}") for i in range(1, 11)]
-GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
+# ========================================================
+# ROBUST GEMINI LLM WITH FALLBACK IMPLEMENTATION
+# ========================================================
+# Configuration for multiple API keys and model fallback strategy
+GEMINI_KEYS = [os.getenv("gemini_key_1"), os.getenv("gemini_key_2"), os.getenv("gemini_key_3")]
 
 MODEL_HIERARCHY = [
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite"
+    "gemini-2.5-pro",        # Most capable, first choice
+    "gemini-2.5-flash",      # Good balance of capabilities
+    "gemini-2.5-flash-lite", # Faster, less capable
+    "gemini-2.0-flash",      # Fallback to previous generation
+    "gemini-2.0-flash-lite"  # Last resort
 ]
 
 MAX_RETRIES_PER_KEY = 2
@@ -73,8 +111,20 @@ QUOTA_KEYWORDS = ["quota", "exceeded", "rate limit", "403", "too many requests"]
 if not GEMINI_KEYS:
     raise RuntimeError("No Gemini API keys found. Please set them in your environment.")
 
-# -------------------- LLM wrapper --------------------
+# ========================================================
+# LLM WRAPPER WITH FALLBACK CAPABILITY
+# ========================================================
 class LLMWithFallback:
+    """
+    Wrapper for Gemini LLM that provides automatic fallback to alternative models 
+    and API keys when encountering errors.
+    
+    Features:
+    - Tries multiple API keys when quotas are exceeded
+    - Falls back to less capable but available models
+    - Tracks errors and failure rates for keys
+    - Provides standard interface compatible with LangChain
+    """
     def __init__(self, keys=None, models=None, temperature=0):
         self.keys = keys or GEMINI_KEYS
         self.models = models or MODEL_HIERARCHY
@@ -84,6 +134,10 @@ class LLMWithFallback:
         self.current_llm = None  # placeholder for actual ChatGoogleGenerativeAI instance
 
     def _get_llm_instance(self):
+        """
+        Attempt to create a working LLM instance by trying different models and API keys.
+        Returns first successful instance or raises RuntimeError if all fail.
+        """
         last_error = None
         for model in self.models:
             for key in self.keys:
@@ -106,21 +160,32 @@ class LLMWithFallback:
 
     # Required by LangChain agent
     def bind_tools(self, tools):
+        """Bind tools to the LLM for agent use (required by LangChain)"""
         llm_instance = self._get_llm_instance()
         return llm_instance.bind_tools(tools)
 
     # Keep .invoke interface
     def invoke(self, prompt):
+        """Invoke the LLM with given prompt"""
         llm_instance = self._get_llm_instance()
         return llm_instance.invoke(prompt)
 
 
+# Global timeout configuration for LLM operations
 LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", 240))
 
 
+# ========================================================
+# APPLICATION ROUTES
+# ========================================================
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
-    """Serve the main HTML interface"""
+    """
+    Serve the main HTML interface for the data analyst agent.
+    
+    Returns:
+        HTMLResponse: The frontend interface HTML
+    """
     try:
         with open("index.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
@@ -131,9 +196,17 @@ async def serve_frontend():
 def parse_keys_and_types(raw_questions: str):
     """
     Parses the key/type section from the questions file.
+    
+    The format expected is:
+    - `key_name`: type
+    
+    Args:
+        raw_questions: String containing questions with type annotations
+        
     Returns:
-        keys_list: list of keys in order
-        type_map: dict key -> casting function
+        tuple: (keys_list, type_map) where:
+            - keys_list is an ordered list of keys
+            - type_map maps each key to its corresponding casting function
     """
     import re
     pattern = r"-\s*`([^`]+)`\s*:\s*(\w+)"
@@ -150,21 +223,34 @@ def parse_keys_and_types(raw_questions: str):
     return keys_list, type_map
 
 
-
-
-# -----------------------------
-# Tools
-# -----------------------------
-
+# ========================================================
+# DATA ACQUISITION TOOLS
+# ========================================================
 @tool
 def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
     """
-    Fetch a URL and return data as a DataFrame (supports HTML tables, CSV, Excel, Parquet, JSON, and plain text).
-    Always returns {"status": "success", "data": [...], "columns": [...]} if fetch works.
+    Fetch a URL and return data as a DataFrame.
+    
+    Supports multiple data formats:
+    - HTML tables
+    - CSV
+    - Excel
+    - Parquet
+    - JSON
+    - Plain text (fallback)
+    
+    Args:
+        url: The URL to scrape
+        
+    Returns:
+        Dict with keys:
+        - status: "success" or "error"
+        - data: List of records (if successful)
+        - columns: List of column names (if successful)
+        - message: Error message (if error)
     """
     print(f"Scraping URL: {url}")
     try:
-        from io import BytesIO, StringIO
         from bs4 import BeautifulSoup
 
         headers = {
@@ -236,13 +322,20 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-# -----------------------------
-# Utilities for executing code safely
-# -----------------------------
+# ========================================================
+# UTILITIES FOR SAFE CODE EXECUTION
+# ========================================================
 def clean_llm_output(output: str) -> Dict:
     """
     Extract JSON object from LLM output robustly.
-    Returns dict or {"error": "..."}
+    
+    Handles various JSON formatting scenarios and cleans the output.
+    
+    Args:
+        output: Raw text output from LLM
+        
+    Returns:
+        Dict: Parsed JSON object or error details
     """
     try:
         if not output:
@@ -270,6 +363,7 @@ def clean_llm_output(output: str) -> Dict:
     except Exception as e:
         return {"error": str(e)}
 
+# Scraping function definition for user code sandboxes
 SCRAPE_FUNC = r'''
 from typing import Dict, Any
 import requests
@@ -331,13 +425,21 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
 
 def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: int = 60) -> Dict[str, Any]:
     """
-    Write a temp python file which:
-      - provides a safe environment (imports)
-      - loads df/from pickle if provided into df and data variables
-      - defines a robust plot_to_base64() helper that ensures < 100kB (attempts resizing/conversion)
-      - executes the user code (which should populate `results` dict)
-      - prints json.dumps({"status":"success","result":results})
-    Returns dict with parsed JSON or error details.
+    Write and execute a temporary Python script in a safe environment.
+    
+    The script includes:
+    - Standard data science imports (pandas, numpy, matplotlib)
+    - Dataframe loading from pickle if provided
+    - Helper functions for image conversion and scraping
+    - The user's code, which populates a 'results' dictionary
+    
+    Args:
+        code: Python code to execute
+        injected_pickle: Path to pickled DataFrame (optional)
+        timeout: Maximum execution time in seconds
+        
+    Returns:
+        Dict: Execution results or error information
     """
     # create file content
     preamble = [
@@ -445,22 +547,16 @@ def plot_to_base64(max_bytes=100000):
             pass
 
 
-# -----------------------------
-# LLM agent setup
-# -----------------------------
-# llm = ChatGoogleGenerativeAI(
-#     model=os.getenv("GOOGLE_MODEL", "gemini-2.5-pro"),
-#     temperature=0,
-#     google_api_key=os.getenv("GOOGLE_API_KEY")
-# )
-# -------------------- Initialize LLM --------------------
+# ========================================================
+# LLM AGENT CONFIGURATION
+# ========================================================
+# Initialize LLM with fallback capabilities
 llm = LLMWithFallback(temperature=0)
-# -----------------------------
 
 # Tools list for agent (LangChain tool decorator returns metadata for the LLM)
 tools = [scrape_url_to_dataframe]  # we only expose scraping as a tool; agent will still produce code
 
-# Prompt: instruct agent to call the tool and output JSON only
+# System prompt that instructs the agent on how to structure responses
 prompt = ChatPromptTemplate.from_messages([
     ("system", """You are a full-stack autonomous data analyst agent.
 
@@ -485,12 +581,14 @@ You must:
     MessagesPlaceholder(variable_name="agent_scratchpad"),
 ])
 
+# Create agent with tool-calling capabilities
 agent = create_tool_calling_agent(
     llm=llm,
     tools=[scrape_url_to_dataframe],  # let the agent call tools if it wants; we will also pre-process scrapes
     prompt=prompt
 )
 
+# Set up agent executor to manage agent interactions
 agent_executor = AgentExecutor(
     agent=agent,
     tools=[scrape_url_to_dataframe],
@@ -502,15 +600,24 @@ agent_executor = AgentExecutor(
 )
 
 
-# -----------------------------
-# Runner: orchestrates agent -> pre-scrape inject -> execute
-# -----------------------------
+# ========================================================
+# AGENT EXECUTION ENGINE
+# ========================================================
 def run_agent_safely(llm_input: str) -> Dict:
     """
-    1. Run the agent_executor.invoke to get LLM output
-    2. Extract JSON, get 'code' and 'questions'
-    3. Detect scrape_url_to_dataframe("...") calls in code, run them here, pickle df and inject before exec
-    4. Execute the code in a temp file and return results mapping questions -> answers
+    Orchestrates the complete agent workflow:
+    
+    1. Gets LLM response to the input
+    2. Extracts code and questions from JSON
+    3. Pre-processes any scraping requests
+    4. Executes the code safely
+    5. Maps question strings to answers
+    
+    Args:
+        llm_input: Formatted input with rules, questions and data preview
+        
+    Returns:
+        Dict: Results mapping questions to answers, or error information
     """
     try:
         response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
@@ -563,10 +670,27 @@ def run_agent_safely(llm_input: str) -> Dict:
         return {"error": str(e)}
 
 
-from fastapi import Request
-
+# ========================================================
+# API ENDPOINTS
+# ========================================================
 @app.post("/api")
 async def analyze_data(request: Request):
+    """
+    Main endpoint for data analysis.
+    
+    Accepts:
+    - questions_file: Text file with questions to answer
+    - data_file: (Optional) Dataset to analyze
+    
+    Process:
+    1. Parses questions and type hints
+    2. Loads and processes any uploaded data
+    3. Runs the LLM agent to generate and execute analysis code
+    4. Returns structured results
+    
+    Returns:
+        JSONResponse: Results of the analysis or error details
+    """
     try:
         form = await request.form()
         questions_file = None
@@ -700,10 +824,19 @@ async def analyze_data(request: Request):
 
 def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
     """
-    Runs the LLM agent and executes code.
-    - Retries up to 3 times if agent returns no output.
-    - If pickle_path is provided, injects that DataFrame directly.
-    - If no pickle_path, falls back to scraping when needed.
+    Unified agent execution with retries and error handling.
+    
+    This function:
+    1. Retries LLM calls if needed
+    2. Processes scraped data or uses provided data
+    3. Executes code safely and returns results
+    
+    Args:
+        llm_input: The formatted input for the LLM agent
+        pickle_path: Optional path to pickled DataFrame
+        
+    Returns:
+        Dict: Results mapping questions to answers or error details
     """
     try:
         max_retries = 3
@@ -751,15 +884,9 @@ def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
         return {"error": str(e)}
 
 
-    
-from fastapi.responses import FileResponse, Response
-import base64, os
-
-# 1×1 transparent PNG fallback (if favicon.ico file not present)
-_FAVICON_FALLBACK_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO3n+9QAAAAASUVORK5CYII="
-)
-
+# ========================================================
+# UTILITY ROUTES
+# ========================================================
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     """
@@ -771,50 +898,32 @@ async def favicon():
         return FileResponse(path, media_type="image/x-icon")
     return Response(content=_FAVICON_FALLBACK_PNG, media_type="image/png")
 
+
 @app.get("/api", include_in_schema=False)
 async def analyze_get_info():
     """Health/info endpoint. Use POST /api for actual analysis."""
     return JSONResponse({
         "ok": True,
         "message": "Server is running. Use POST /api with 'questions_file' and optional 'data_file'.",
-
     })
 
 
+# ========================================================
+# SYSTEM DIAGNOSTICS MODULE
+# ========================================================
 
-# -----------------------------
-# System Diagnostics
-# -----------------------------
-# ---- Add these imports near other imports at top of app.py ----
-import asyncio
-import httpx
-import importlib.metadata
-import traceback
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
-from datetime import datetime, timedelta
-import socket
-import platform
-import psutil
-import shutil
-import tempfile
-import os
-import time 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse    
-
-# ---- Configuration for diagnostics (tweak as needed) ----
+# Configuration for diagnostics
 DIAG_NETWORK_TARGETS = {
     "Google AI": "https://generativelanguage.googleapis.com",
     "AISTUDIO": "https://aistudio.google.com/",
     "OpenAI": "https://api.openai.com",
     "GitHub": "https://api.github.com",
 }
-DIAG_LLM_KEY_TIMEOUT = 30  # seconds per key/model simple ping test (sync tests run in threadpool)
-DIAG_PARALLELISM = 6       # how many thread workers for sync checks
-RUN_LONGER_CHECKS = False  # Playwright/duckdb tests run only if true (they can be slow)
+DIAG_LLM_KEY_TIMEOUT = 30  # seconds per key/model simple ping test
+DIAG_PARALLELISM = 6       # thread workers for sync checks
+RUN_LONGER_CHECKS = False  # Playwright/duckdb tests run only if true
 
-# Use existing GEMINI_KEYS / MODEL_HIERARCHY from your app. If not defined, create empty lists.
+# Use existing keys/models or create empty lists
 try:
     _GEMINI_KEYS = GEMINI_KEYS
     _MODEL_HIERARCHY = MODEL_HIERARCHY
@@ -822,13 +931,23 @@ except NameError:
     _GEMINI_KEYS = []
     _MODEL_HIERARCHY = []
 
-# helper: iso timestamp
+# Create 1×1 transparent PNG fallback for favicon
+_FAVICON_FALLBACK_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO3n+9QAAAAASUVORK5CYII="
+)
+
+# Helper: ISO timestamp generator
 def _now_iso():
+    """Return current UTC time in ISO 8601 format with Z suffix"""
     return datetime.utcnow().isoformat() + "Z"
 
-# helper: run sync func in threadpool and return result / exception info
+# Helper: run sync function in threadpool with timeout
 _executor = ThreadPoolExecutor(max_workers=DIAG_PARALLELISM)
 async def run_in_thread(fn, *a, timeout=30, **kw):
+    """
+    Run a synchronous function in a threadpool with timeout.
+    Propagates exceptions for better error handling.
+    """
     loop = asyncio.get_running_loop()
     try:
         task = loop.run_in_executor(_executor, partial(fn, *a, **kw))
@@ -839,8 +958,11 @@ async def run_in_thread(fn, *a, timeout=30, **kw):
         # re-raise for caller to capture stacktrace easily
         raise
 
-# ---- Diagnostic check functions (safely return dicts) ----
+
+# ---- Diagnostic check functions ----
+
 def _env_check(required=None):
+    """Check for presence of required environment variables"""
     required = required or []
     out = {}
     for k in required:
@@ -851,6 +973,7 @@ def _env_check(required=None):
     return out
 
 def _system_info():
+    """Collect system information for diagnostics"""
     info = {
         "host": socket.gethostname(),
         "platform": platform.system(),
@@ -882,6 +1005,7 @@ def _system_info():
     return info
 
 def _temp_write_test():
+    """Test write access to temp directory"""
     tmp = tempfile.gettempdir()
     path = os.path.join(tmp, f"diag_test_{int(time.time())}.tmp")
     with open(path, "w") as f:
@@ -891,7 +1015,7 @@ def _temp_write_test():
     return {"tmp_dir": tmp, "write_ok": ok}
 
 def _app_write_test():
-    # try writing into current working directory
+    """Test write access to application directory"""
     cwd = os.getcwd()
     path = os.path.join(cwd, f"diag_test_{int(time.time())}.tmp")
     with open(path, "w") as f:
@@ -901,6 +1025,7 @@ def _app_write_test():
     return {"cwd": cwd, "write_ok": ok}
 
 def _pandas_pipeline_test():
+    """Test basic pandas functionality"""
     import pandas as _pd
     df = _pd.DataFrame({"x":[1,2,3], "y":[4,5,6]})
     df["z"] = df["x"] * df["y"]
@@ -908,7 +1033,7 @@ def _pandas_pipeline_test():
     return {"rows": df.shape[0], "cols": df.shape[1], "z_sum": int(agg)}
 
 def _installed_packages_sample():
-    # return top 20 installed package names + versions
+    """Get sample of installed Python packages"""
     try:
         out = []
         for dist in importlib.metadata.distributions():
@@ -924,19 +1049,17 @@ def _installed_packages_sample():
         return {"error": str(e)}
 
 def _network_probe_sync(url, timeout=30):
-    # synchronous network probe for threadpool use
+    """Test network connectivity to a specific URL"""
     try:
         r = requests.head(url, timeout=timeout)
         return {"ok": True, "status_code": r.status_code, "latency_ms": int(r.elapsed.total_seconds()*1000)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# ---- LLM key+model light test (sync) ----
-# tries each key for each model with a short per-call timeout (run in threadpool)
 def _test_gemini_key_model(key, model, ping_text="ping"):
     """
     Test a Gemini API key by sending a minimal request.
-    Always returns a pure dict with only primitive types.
+    Returns structured info about the test results.
     """
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -988,8 +1111,14 @@ def _test_gemini_key_model(key, model, ping_text="ping"):
     except Exception as e_outer:
         return {"ok": False, "error": str(e_outer)}
 
-# ---- Async wrappers that call the sync checks in threadpool ----
+
+# ---- Async network diagnostic functions ----
+
 async def check_network():
+    """
+    Check connectivity to multiple important API endpoints in parallel.
+    Returns status and latency information for each endpoint.
+    """
     coros = []
     for name, url in DIAG_NETWORK_TARGETS.items():
         coros.append(run_in_thread(_network_probe_sync, url, timeout=30))
@@ -1003,7 +1132,10 @@ async def check_network():
     return out
 
 async def check_llm_keys_models():
-    """Try all GEMINI_KEYS on each model (light-touch). Runs in threadpool with per-key timeout."""
+    """
+    Test all Gemini API keys against each model in priority order.
+    Stops after finding first working key/model combination.
+    """
     if not _GEMINI_KEYS:
         return {"warning": "no GEMINI_KEYS configured"}
 
@@ -1031,8 +1163,10 @@ async def check_llm_keys_models():
             break
     return {"models_tested": results}
 
-# ---- Optional slow heavy checks (DuckDB, Playwright) ----
+# ---- Optional extended diagnostic checks ----
+
 async def check_duckdb():
+    """Test if DuckDB is available and functional"""
     try:
         import duckdb
         def duck_check():
@@ -1045,6 +1179,7 @@ async def check_duckdb():
         return {"duckdb_error": str(e)}
 
 async def check_playwright():
+    """Test if Playwright browser automation is available and functional"""
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
@@ -1057,11 +1192,28 @@ async def check_playwright():
     except Exception as e:
         return {"playwright_error": str(e)}
 
-# ---- Final /diagnose route (concurrent) ----
-from fastapi import Query
+# ---- System diagnostics API endpoint ----
 
 @app.get("/summary")
 async def diagnose(full: bool = Query(False, description="If true, run extended checks (duckdb/playwright)")):
+    """
+    Comprehensive system diagnostics endpoint.
+    
+    Performs multiple checks in parallel:
+    - Environment variables
+    - System information
+    - File system access
+    - Pandas functionality
+    - Network connectivity
+    - LLM API key testing
+    - Optional: DuckDB and Playwright testing
+    
+    Args:
+        full: Whether to run extended checks
+        
+    Returns:
+        Dict: Complete diagnostic report with status of all checks
+    """
     started = datetime.utcnow()
     report = {
         "status": "ok",
@@ -1113,7 +1265,9 @@ async def diagnose(full: bool = Query(False, description="If true, run extended 
     return report
 
 
+# ========================================================
+# APPLICATION ENTRY POINT
+# ========================================================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-
