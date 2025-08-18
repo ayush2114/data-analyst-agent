@@ -29,7 +29,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY index.html .
 COPY serve.sh .
-COPY .env* ./   # Copy environment file if it exists
+
+# if [ -f ".env" ]; then
+#   export $(cat .env | xargs)
+# fi
+# COPY .env* ./   # Copy environment file if it exists
 
 # -------------------------------
 #   Permissions
