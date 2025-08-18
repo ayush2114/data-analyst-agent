@@ -94,7 +94,8 @@ app = FastAPI()
 # ROBUST GEMINI LLM WITH FALLBACK IMPLEMENTATION
 # ========================================================
 # Configuration for multiple API keys and model fallback strategy
-GEMINI_KEYS = [os.getenv("gemini_key_1"), os.getenv("gemini_key_2"), os.getenv("gemini_key_3")]
+GEMINI_KEYS = [os.getenv(f"gemini_api_{i}") for i in range(1, 11)]
+GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
 MODEL_HIERARCHY = [
     "gemini-2.5-pro",        # Most capable, first choice
